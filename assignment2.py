@@ -14,6 +14,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 sns.set_style('whitegrid')
+import scipy.stats as stats
 
 # machine learning
 from sklearn.linear_model import LogisticRegression
@@ -22,6 +23,8 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.naive_bayes import GaussianNB
 import xgboost as xgb
+from sklearn.model_selection import RandomizedSearchCV
+
 
 from sklearn.model_selection import train_test_split
 from sklearn import preprocessing
@@ -29,13 +32,72 @@ from sklearn.datasets import dump_svmlight_file
 from itertools import tee, islice, chain
 from datetime import datetime
 from tqdm import tqdm
+import logging
 
+# create logger with 'spam_application'
+logger = logging.getLogger('assignment2')
+logger.setLevel(logging.DEBUG)
+# create file handler which logs even debug messages
+fh = logging.FileHandler('train_test.log')
+fh.setLevel(logging.DEBUG)
+# create console handler with a higher log level
+ch = logging.StreamHandler()
+ch.setLevel(logging.ERROR)
+# create formatter and add it to the handlers
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+fh.setFormatter(formatter)
+ch.setFormatter(formatter)
+# add the handlers to the logger
+logger.addHandler(fh)
+logger.addHandler(ch)
+
+def log_evaluation(period=1, show_stdv=True):
+    """Create a callback that logs evaluation result with logger.
+
+    Parameters
+    ----------
+    period : int
+        The period to log the evaluation results
+
+    show_stdv : bool, optional
+         Whether show stdv if provided
+
+    Returns
+    -------
+    callback : function
+        A callback that logs evaluation every period iterations into logger.
+    """
+
+    def _fmt_metric(value, show_stdv=True):
+        """format metric string"""
+        if len(value) == 2:
+            return '%s:%g' % (value[0], value[1])
+        elif len(value) == 3:
+            if show_stdv:
+                return '%s:%g+%g' % (value[0], value[1], value[2])
+            else:
+                return '%s:%g' % (value[0], value[1])
+        else:
+            raise ValueError("wrong metric value")
+
+    def callback(env):
+        if env.rank != 0 or len(env.evaluation_result_list) == 0 or period is False:
+            return
+        i = env.iteration
+        if i % period == 0 or i + 1 == env.begin_iteration or i + 1 == env.end_iteration:
+            msg = '\t'.join([_fmt_metric(x, show_stdv) for x in env.evaluation_result_list])
+            logger.info('[%d]\t%s\n' % (i, msg))
+
+    return callback
 
 # Input data files are available in the "../input/" directory.
 # For example, running this (by clicking run or pressing Shift+Enter) will list the files in the input directory
 
 expedia_df = pd.read_csv('training_set_VU_DM.csv')
 exptest_df    = pd.read_csv('test_set_VU_DM.csv')
+
+logger.info('Train and Test Data Read!')
+logger.info('')
 
 # most_booked_hotel = pd.DataFrame(expedia_df.groupby('prop_id')['booking_bool'].sum().reset_index())
 # most_booked_hotel.columns = ['prop_id', 'booking_count']
@@ -66,15 +128,9 @@ cases = [srch_crit,hotel_static,hotel_dyn,visitor_loc,visitor_agg,competitive,ot
 # preview the data
 expedia_df.head()
 
-expedia_df.info()
-# print("----------------------------")
-# test_df.info()
+expedia_df.describe()
 
-# drop unnecessary columns, these columns won't be useful in analysis and prediction
-# expedia_df = expedia_df.drop(['date_time','site_name', 'user_location_region', 'user_location_city', 'orig_destination_distance', 
-                              # 'user_id', 'srch_co', 'srch_adults_cnt', 'srch_children_cnt', 'srch_rm_cnt', 'cnt'], axis=1)
-# test_df    = test_df.drop(['date_time','site_name', 'user_location_region', 'user_location_city', 'orig_destination_distance', 
-                              # 'user_id', 'srch_co', 'srch_adults_cnt', 'srch_children_cnt', 'srch_rm_cnt', 'cnt'], axis=1)
+logger.info('Start Plotting...')
 
 fig, (axis1,axis2) = plt.subplots(2,1,figsize=(15,10))
 
@@ -122,8 +178,12 @@ missing_data = 100*(1-expedia_df.isnull().sum(axis=0)/expedia_df.shape[0])
 missing_data.sort_values().plot(kind='bar',colormap="Set3",figsize=(15,5))
 plt.show()
 
+logger.info('Plotting ends...')
+logger.info('Preprocessing...')
+
 expedia_df.drop(columns=['date_time'],inplace=True)
 expedia_df = expedia_df.fillna(-1)
+expedia_df['price_usd'][expedia_df['price_usd']<0.01] = 0.01
 expedia_df['price_usd'] = expedia_df['price_usd'].map(np.log10)
 
 exptest_df.drop(columns=['date_time'],inplace=True)
@@ -132,12 +192,17 @@ exptest_df['price_usd'][exptest_df['price_usd']<0.01] = 0.01
 
 exptest_df['price_usd'] = exptest_df['price_usd'].map(np.log10)
 
+logger.info('Preprocessing done...')
+
 # expedia_df['prop_review_score'] = expedia_df['prop_review_score'].fillna(0)
 # expedia_df['prop_location_score2'] = expedia_df['prop_location_score2'].fillna(0)
 # expedia_df['srch_query_affinity_score'] = expedia_df['srch_query_affinity_score'].fillna(expedia_df['srch_query_affinity_score'].min())
 num_feats = ['prop_review_score','prop_location_score1','prop_location_score2',
              'prop_log_historical_price','price_usd','srch_query_affinity_score',
              'orig_destination_distance']
+
+logger.info('Additional Feature generation...')
+
 expedia_df['price_diff_from_recent'] = expedia_df['price_usd']-expedia_df['prop_log_historical_price']
 exptest_df['price_diff_from_recent'] = exptest_df['price_usd']-exptest_df['prop_log_historical_price']
 
@@ -156,6 +221,8 @@ exptest_df['price_order'] = exptest_df.groupby('srch_id')['price_usd'].apply(lam
 #     idxs = exptest_df['srch_id'] == idx
 #     exptest_df['price_order'][idxs] = exptest_df['price_usd'][idxs].argsort()
 
+logger.info('Grouped feature generation...')
+logger.info('Numerical features:'+str(num_feats))
 
 for ff in num_feats:    
     dummy = pd.DataFrame(expedia_df.groupby('srch_id')[ff].mean().reset_index())
@@ -189,6 +256,8 @@ for ff in num_feats:
     exptest_df = pd.merge(exptest_df, dummy, how='left', left_on='srch_destination_id', right_on='srch_destination_id')
 
     print(ff,'is done!')
+    logger.info(ff+' is done...')
+
 
 # for ff in num_feats:
 #     expedia_df['mean_srch_'+ff] = 0.0
@@ -207,7 +276,9 @@ for ff in num_feats:
 #     for idx in expedia_df['srch_destination_id'].unique():
 #         idxs = expedia_df['srch_destination_id'] == idx
 #         expedia_df['mean_dest_'+ff][idxs] = expedia_df[ff][idxs].mean()
-    
+ 
+logger.info('Training, test and validation data separation...')
+
 # separate booking bools and keep all the booking_bools
 booking_bool_0_df = expedia_df[expedia_df['booking_bool'] == 0]
 booking_bool_1_df = expedia_df[expedia_df['booking_bool'] == 1] 
@@ -284,16 +355,56 @@ valid_dmatrix = xgb.DMatrix(X_val, y_val)
 valid_dmatrix.set_group(group_counts_val)
 
 params = {'objective': 'rank:ndcg',
-          'max_bin': 500,
-          'num_parallel_tree':6}
+          'nthread':-1, 
+          'silent': False,
+          'max_depth': 9,
+          'learning_rate': 0.13877466758976015,
+          'colsample_bytree': 0.6,
+          'n_estimators': 100}
 
-num_round = 10
+# HYPERPARAMETER OPTIMIZATION IS DONE BY THIS CODE
+# clf = xgb.XGBClassifier(objective = 'rank:ndcg',nthread=-1,silent =  False)
 
+# param_grid = {        
+#         'max_depth': [i for i in range(5,20,1)],
+#         'learning_rate': stats.uniform(0.001,0.3),
+#         'subsample': [0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+#         'colsample_bytree': [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+#         'colsample_bylevel': [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+#         'min_child_weight': [0.5, 1.0, 3.0, 5.0, 7.0, 10.0],
+#         'gamma': [0, 0.25, 0.5, 1.0],
+#         'reg_lambda': [0.1, 1.0, 5.0, 10.0, 50.0, 100.0],
+#         'n_estimators': [100],
+#         'early_stopping_rounds': [10],
+#         'eval_set': [(X_val, y_val)]}
+
+
+# rs_clf = RandomizedSearchCV(clf, param_grid, n_iter=20,
+#                             n_jobs=1, verbose=2, cv=2,
+#                             refit=False, random_state=42)
+
+# print("Randomized search..")
+# search_time_start = time.time()
+# rs_clf.fit(X_train, y_train)
+# print("Randomized search time:", time.time() - search_time_start)
+
+# best_score = rs_clf.best_score_
+# best_params = rs_clf.best_params_
+# print("Best score: {}".format(best_score))
+# print("Best params: ")
+# for param_name in sorted(best_params.keys()):
+#     print('%s: %r' % (param_name, best_params[param_name]))
+
+num_round = 1000
+
+logger.info('Training started...')
+callbacks = [log_evaluation(1, True)]
 print("Start training at {}".format(datetime.now()))
-bst = xgb.train(params, train_dmatrix, evals=[(valid_dmatrix, 'validation')])
+bst = xgb.train(params, train_dmatrix, num_round,  early_stopping_rounds=10,
+                evals=[(valid_dmatrix, 'validation')],callbacks=callbacks)
 print("Finished training at {}".format(datetime.now()))
 
-
+logger.info('Training finished')
 
     
 srch_id_list = []
@@ -305,6 +416,7 @@ def current_and_next(some_iterable):
     return zip(start, stop)
 
 print("Start prediction at {}".format(datetime.now()))
+logger.info('Start prediction...')
 
 for item, nxt in tqdm(current_and_next(idx_cum_sum)):
     # need to increase start by one for all except first one, so index does not 
@@ -348,11 +460,14 @@ for item, nxt in tqdm(current_and_next(idx_cum_sum)):
         #prediction_result_df = prediction_result_df.append(single_result_df)
 
 print("Finished prediction at {}".format(datetime.now()))
+logger.info('Finished prediction...')
 
 prediction_result_df = pd.DataFrame({'srch_id': srch_id_list, 'prop_id': prop_id_list})
 print(prediction_result_df.head(20))
 
 prediction_result_df.to_csv('predictionsVU87.csv', index=False)
+logger.info('Prediction File saved!')
+
     
     
     
