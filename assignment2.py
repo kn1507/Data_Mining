@@ -105,7 +105,7 @@ def log_evaluation(period=1, show_stdv=True):
 # Input data files are available in the "../input/" directory.
 # For example, running this (by clicking run or pressing Shift+Enter) will list the files in the input directory
 
-if ~path.exists("./expedia.pkl") or ~path.exists("./exptest.pkl"):
+if not path.exists("./expedia.pkl") or not path.exists("./exptest.pkl"):
     expedia_df = pd.read_csv('training_set_VU_DM.csv')
     exptest_df    = pd.read_csv('test_set_VU_DM.csv')
     
@@ -203,7 +203,8 @@ if ~path.exists("./expedia.pkl") or ~path.exists("./exptest.pkl"):
     expedia_df[['orig_destination_distance']] = mms.fit_transform(expedia_df[['orig_destination_distance']])
     expedia_df = expedia_df.fillna(-2)
     
-    expedia_df['price_usd'].loc[expedia_df['price_usd']<0.01] = 0.01
+    th = 1
+    expedia_df['price_usd'].loc[expedia_df['price_usd']<th] = th
     expedia_df['price_usd'] = expedia_df['price_usd'].map(np.log10)
     
     exptest_df.drop(columns=['date_time'],inplace=True)
@@ -213,7 +214,7 @@ if ~path.exists("./expedia.pkl") or ~path.exists("./exptest.pkl"):
     exptest_df[['orig_destination_distance']] = mms.fit_transform(exptest_df[['orig_destination_distance']])
     
     exptest_df = exptest_df.fillna(-2)
-    exptest_df['price_usd'].loc[exptest_df['price_usd']<0.01] = 0.01
+    exptest_df['price_usd'].loc[exptest_df['price_usd']<th] = th
     
     exptest_df['price_usd'] = exptest_df['price_usd'].map(np.log10)
     
@@ -284,10 +285,10 @@ if ~path.exists("./expedia.pkl") or ~path.exists("./exptest.pkl"):
         logger.info(ff+' is done...')
     
     expedia_df.to_pickle("./expedia.pkl")
-    exptest_df.to_pickle("./extest.pkl")
+    exptest_df.to_pickle("./exptest.pkl")
 
 expedia_df = pd.read_pickle("./expedia.pkl")
-exptest_df = pd.read_pickle("./extest.pkl")
+exptest_df = pd.read_pickle("./exptest.pkl")
 # for ff in num_feats:
 #     expedia_df['mean_srch_'+ff] = 0.0
 #     for idx in expedia_df['srch_id'].unique():
